@@ -13,39 +13,6 @@
 %% ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 %% OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-%% @doc HTTP protocol handler.
-%%
-%% The available options are:
-%% <dl>
-%%  <dt>compress</dt><dd>Whether to automatically compress the response
-%%   body when the conditions are met. Disabled by default.</dd>
-%%  <dt>env</dt><dd>The environment passed and optionally modified
-%%   by middlewares.</dd>
-%%  <dt>max_empty_lines</dt><dd>Max number of empty lines before a request.
-%%   Defaults to 5.</dd>
-%%  <dt>max_header_name_length</dt><dd>Max length allowed for header names.
-%%   Defaults to 64.</dd>
-%%  <dt>max_header_value_length</dt><dd>Max length allowed for header values.
-%%   Defaults to 4096.</dd>
-%%  <dt>max_headers</dt><dd>Max number of headers allowed.
-%%   Defaults to 100.</dd>
-%%  <dt>max_keepalive</dt><dd>Max number of requests allowed in a single
-%%   keep-alive session. Defaults to 100.</dd>
-%%  <dt>max_request_line_length</dt><dd>Max length allowed for the request
-%%   line. Defaults to 4096.</dd>
-%%  <dt>middlewares</dt><dd>The list of middlewares to execute when a
-%%   request is received.</dd>
-%%  <dt>onrequest</dt><dd>Optional fun that allows Req interaction before
-%%   any dispatching is done. Host info, path info and bindings are thus
-%%   not available at this point.</dd>
-%%  <dt>onresponse</dt><dd>Optional fun that allows replacing a response
-%%   sent by the application.</dd>
-%%  <dt>timeout</dt><dd>Time in milliseconds a client has to send the
-%%   full request line and headers. Defaults to 5000 milliseconds.</dd>
-%% </dl>
-%%
-%% Note that there is no need to monitor these processes when using Cowboy as
-%% an application as it already supervises them under the listener supervisor.
 -module(cowboy_protocol).
 
 %% API.
@@ -65,7 +32,6 @@
 	| {max_keepalive, non_neg_integer()}
 	| {max_request_line_length, non_neg_integer()}
 	| {middlewares, [module()]}
-	| {onrequest, cowboy:onrequest_fun()}
 	| {onresponse, cowboy:onresponse_fun()}
 	| {timeout, timeout()}].
 -export_type([opts/0]).
@@ -76,7 +42,6 @@
 	middlewares :: [module()],
 	compress :: boolean(),
 	env :: cowboy_middleware:env(),
-	onrequest :: undefined | cowboy:onrequest_fun(),
 	onresponse = undefined :: undefined | cowboy:onresponse_fun(),
 	max_empty_lines :: non_neg_integer(),
 	req_keepalive = 1 :: non_neg_integer(),
@@ -90,10 +55,10 @@
 }).
 
 -include_lib("cowlib/include/cow_inline.hrl").
+-include_lib("cowlib/include/cow_parse.hrl").
 
 %% API.
 
-%% @doc Start an HTTP protocol process.
 -spec start_link(ranch:ref(), inet:socket(), module(), opts()) -> {ok, pid()}.
 start_link(Ref, Socket, Transport, Opts) ->
 	Pid = spawn_link(?MODULE, init, [Ref, Socket, Transport, Opts]),
@@ -101,15 +66,13 @@ start_link(Ref, Socket, Transport, Opts) ->
 
 %% Internal.
 
-%% @doc Faster alternative to proplists:get_value/3.
-%% @private
+%% Faster alternative to proplists:get_value/3.
 get_value(Key, Opts, Default) ->
 	case lists:keyfind(Key, 1, Opts) of
 		{_, Value} -> Value;
 		_ -> Default
 	end.
 
-%% @private
 -spec init(ranch:ref(), inet:socket(), module(), opts()) -> ok.
 init(Ref, Socket, Transport, Opts) ->
 	Compress = get_value(compress, Opts, false),
@@ -121,7 +84,6 @@ init(Ref, Socket, Transport, Opts) ->
 	MaxRequestLineLength = get_value(max_request_line_length, Opts, 4096),
 	Middlewares = get_value(middlewares, Opts, [cowboy_router, cowboy_handler]),
 	Env = [{listener, Ref}|get_value(env, Opts, [])],
-	OnRequest = get_value(onrequest, Opts, undefined),
 	OnResponse = get_value(onresponse, Opts, undefined),
 	Timeout = get_value(timeout, Opts, 5000),
 	ok = ranch:accept_ack(Ref),
@@ -131,8 +93,7 @@ init(Ref, Socket, Transport, Opts) ->
 		max_request_line_length=MaxRequestLineLength,
 		max_header_name_length=MaxHeaderNameLength,
 		max_header_value_length=MaxHeaderValueLength, max_headers=MaxHeaders,
-		onrequest=OnRequest, onresponse=OnResponse,
-		timeout=Timeout, until=until(Timeout)}, 0).
+		onresponse=OnResponse, timeout=Timeout, until=until(Timeout)}, 0).
 
 -spec until(timeout()) -> non_neg_integer() | infinity.
 until(infinity) ->
@@ -172,10 +133,11 @@ wait_request(Buffer, State=#state{socket=Socket, transport=Transport,
 			terminate(State)
 	end.
 
-%% @private
 -spec parse_request(binary(), #state{}, non_neg_integer()) -> ok.
 %% Empty lines must be using \r\n.
-parse_request(<< $\n, _/binary >>, State, _) ->
+parse_request(<< $\n, _/bits >>, State, _) ->
+	error_terminate(400, State);
+parse_request(<< $\s, _/bits >>, State, _) ->
 	error_terminate(400, State);
 %% We limit the length of the Request-line to MaxLength to avoid endlessly
 %% reading from the socket and eventually crashing.
@@ -189,7 +151,7 @@ parse_request(Buffer, State=#state{max_request_line_length=MaxLength,
 		1 when ReqEmpty =:= MaxEmpty ->
 			error_terminate(400, State);
 		1 ->
-			<< _:16, Rest/binary >> = Buffer,
+			<< _:16, Rest/bits >> = Buffer,
 			parse_request(Rest, State, ReqEmpty + 1);
 		_ ->
 			parse_method(Buffer, State, <<>>)
@@ -211,11 +173,17 @@ parse_method(<< C, Rest/bits >>, State, SoFar) ->
 
 parse_uri(<< $\r, _/bits >>, State, _) ->
 	error_terminate(400, State);
+parse_uri(<< $\s, _/bits >>, State, _) ->
+	error_terminate(400, State);
 parse_uri(<< "* ", Rest/bits >>, State, Method) ->
 	parse_version(Rest, State, Method, <<"*">>, <<>>);
 parse_uri(<< "http://", Rest/bits >>, State, Method) ->
 	parse_uri_skip_host(Rest, State, Method);
 parse_uri(<< "https://", Rest/bits >>, State, Method) ->
+	parse_uri_skip_host(Rest, State, Method);
+parse_uri(<< "HTTP://", Rest/bits >>, State, Method) ->
+	parse_uri_skip_host(Rest, State, Method);
+parse_uri(<< "HTTPS://", Rest/bits >>, State, Method) ->
 	parse_uri_skip_host(Rest, State, Method);
 parse_uri(Buffer, State, Method) ->
 	parse_uri_path(Buffer, State, Method, <<>>).
@@ -224,6 +192,9 @@ parse_uri_skip_host(<< C, Rest/bits >>, State, Method) ->
 	case C of
 		$\r -> error_terminate(400, State);
 		$/ -> parse_uri_path(Rest, State, Method, <<"/">>);
+		$\s -> parse_version(Rest, State, Method, <<"/">>, <<>>);
+		$? -> parse_uri_query(Rest, State, Method, <<"/">>, <<>>);
+		$# -> skip_uri_fragment(Rest, State, Method, <<"/">>, <<>>);
 		_ -> parse_uri_skip_host(Rest, State, Method)
 	end.
 
@@ -294,13 +265,12 @@ match_colon(<< _, Rest/bits >>, N) ->
 match_colon(_, _) ->
 	nomatch.
 
+parse_hd_name(<< $:, Rest/bits >>, S, M, P, Q, V, H, SoFar) ->
+	parse_hd_before_value(Rest, S, M, P, Q, V, H, SoFar);
+parse_hd_name(<< C, Rest/bits >>, S, M, P, Q, V, H, SoFar) when ?IS_WS(C) ->
+	parse_hd_name_ws(Rest, S, M, P, Q, V, H, SoFar);
 parse_hd_name(<< C, Rest/bits >>, S, M, P, Q, V, H, SoFar) ->
-	case C of
-		$: -> parse_hd_before_value(Rest, S, M, P, Q, V, H, SoFar);
-		$\s -> parse_hd_name_ws(Rest, S, M, P, Q, V, H, SoFar);
-		$\t -> parse_hd_name_ws(Rest, S, M, P, Q, V, H, SoFar);
-		?INLINE_LOWERCASE(parse_hd_name, Rest, S, M, P, Q, V, H, SoFar)
-	end.
+	?LOWER(parse_hd_name, Rest, S, M, P, Q, V, H, SoFar).
 
 parse_hd_name_ws(<< C, Rest/bits >>, S, M, P, Q, V, H, Name) ->
 	case C of
@@ -378,7 +348,7 @@ parse_hd_value(<< $\r, Rest/bits >>, S, M, P, Q, V, Headers, Name, SoFar) ->
 			parse_hd_value(Rest2, S, M, P, Q, V, Headers, Name,
 				<< SoFar/binary, C >>);
 		<< $\n, Rest2/bits >> ->
-			parse_header(Rest2, S, M, P, Q, V, [{Name, SoFar}|Headers])
+			parse_header(Rest2, S, M, P, Q, V, [{Name, clean_value_ws_end(SoFar, byte_size(SoFar) - 1)}|Headers])
 	end;
 parse_hd_value(<< C, Rest/bits >>, S, M, P, Q, V, H, N, SoFar) ->
 	parse_hd_value(Rest, S, M, P, Q, V, H, N, << SoFar/binary, C >>);
@@ -387,6 +357,42 @@ parse_hd_value(<<>>, State=#state{max_header_value_length=MaxLength},
 	error_terminate(400, State);
 parse_hd_value(<<>>, S, M, P, Q, V, H, N, SoFar) ->
 	wait_hd_value(<<>>, S, M, P, Q, V, H, N, SoFar).
+
+clean_value_ws_end(_, -1) ->
+	<<>>;
+clean_value_ws_end(Value, N) ->
+	case binary:at(Value, N) of
+		$\s -> clean_value_ws_end(Value, N - 1);
+		$\t -> clean_value_ws_end(Value, N - 1);
+		_ ->
+			S = N + 1,
+			<< Value2:S/binary, _/bits >> = Value,
+			Value2
+	end.
+
+-ifdef(TEST).
+clean_value_ws_end_test_() ->
+	Tests = [
+		{<<>>, <<>>},
+		{<<"     ">>, <<>>},
+		{<<"text/*;q=0.3, text/html;q=0.7, text/html;level=1, "
+			"text/html;level=2;q=0.4, */*;q=0.5   \t   \t    ">>,
+			<<"text/*;q=0.3, text/html;q=0.7, text/html;level=1, "
+				"text/html;level=2;q=0.4, */*;q=0.5">>}
+	],
+	[{V, fun() -> R = clean_value_ws_end(V, byte_size(V) - 1) end} || {V, R} <- Tests].
+-endif.
+
+-ifdef(PERF).
+horse_clean_value_ws_end() ->
+	horse:repeat(200000,
+		clean_value_ws_end(
+			<<"text/*;q=0.3, text/html;q=0.7, text/html;level=1, "
+				"text/html;level=2;q=0.4, */*;q=0.5          ">>,
+			byte_size(<<"text/*;q=0.3, text/html;q=0.7, text/html;level=1, "
+				"text/html;level=2;q=0.4, */*;q=0.5          ">>) - 1)
+	).
+-endif.
 
 request(B, State=#state{transport=Transport}, M, P, Q, Version, Headers) ->
 	case lists:keyfind(<<"host">>, 1, Headers) of
@@ -423,9 +429,7 @@ parse_host(<< $:, Rest/bits >>, false, Acc) ->
 parse_host(<< $], Rest/bits >>, true, Acc) ->
 	parse_host(Rest, false, << Acc/binary, $] >>);
 parse_host(<< C, Rest/bits >>, E, Acc) ->
-	case C of
-		?INLINE_LOWERCASE(parse_host, Rest, E, Acc)
-	end.
+	?LOWER(parse_host, Rest, E, Acc).
 
 %% End of request parsing.
 %%
@@ -440,24 +444,10 @@ request(Buffer, State=#state{socket=Socket, transport=Transport,
 			Req = cowboy_req:new(Socket, Transport, Peer, Method, Path,
 				Query, Version, Headers, Host, Port, Buffer,
 				ReqKeepalive < MaxKeepalive, Compress, OnResponse),
-			onrequest(Req, State);
+			execute(Req, State);
 		{error, _} ->
 			%% Couldn't read the peer address; connection is gone.
 			terminate(State)
-	end.
-
-%% Call the global onrequest callback. The callback can send a reply,
-%% in which case we consider the request handled and move on to the next
-%% one. Note that since we haven't dispatched yet, we don't know the
-%% handler, host_info, path_info or bindings yet.
--spec onrequest(cowboy_req:req(), #state{}) -> ok.
-onrequest(Req, State=#state{onrequest=undefined}) ->
-	execute(Req, State);
-onrequest(Req, State=#state{onrequest=OnRequest}) ->
-	Req2 = OnRequest(Req),
-	case cowboy_req:get(resp_state, Req2) of
-		waiting -> execute(Req2, State);
-		_ -> next_request(Req2, State, ok)
 	end.
 
 -spec execute(cowboy_req:req(), #state{}) -> ok.
@@ -475,13 +465,10 @@ execute(Req, State, Env, [Middleware|Tail]) ->
 		{suspend, Module, Function, Args} ->
 			erlang:hibernate(?MODULE, resume,
 				[State, Env, Tail, Module, Function, Args]);
-		{halt, Req2} ->
-			next_request(Req2, State, ok);
-		{error, Code, Req2} ->
-			error_terminate(Code, Req2, State)
+		{stop, Req2} ->
+			next_request(Req2, State, ok)
 	end.
 
-%% @private
 -spec resume(#state{}, cowboy_middleware:env(), [module()],
 	module(), module(), [any()]) -> ok.
 resume(State, Env, Tail, Module, Function, Args) ->
@@ -491,10 +478,8 @@ resume(State, Env, Tail, Module, Function, Args) ->
 		{suspend, Module2, Function2, Args2} ->
 			erlang:hibernate(?MODULE, resume,
 				[State, Env, Tail, Module2, Function2, Args2]);
-		{halt, Req2} ->
-			next_request(Req2, State, ok);
-		{error, Code, Req2} ->
-			error_terminate(Code, Req2, State)
+		{stop, Req2} ->
+			next_request(Req2, State, ok)
 	end.
 
 -spec next_request(cowboy_req:req(), #state{}, any()) -> ok.
@@ -507,13 +492,14 @@ next_request(Req, State=#state{req_keepalive=Keepalive, timeout=Timeout},
 		close ->
 			terminate(State);
 		_ ->
-			Buffer = case cowboy_req:skip_body(Req) of
-				{ok, Req2} -> cowboy_req:get(buffer, Req2);
+			%% Skip the body if it is reasonably sized. Close otherwise.
+			Buffer = case cowboy_req:body(Req) of
+				{ok, _, Req2} -> cowboy_req:get(buffer, Req2);
 				_ -> close
 			end,
 			%% Flush the resp_sent message before moving on.
-			receive {cowboy_req, resp_sent} -> ok after 0 -> ok end,
 			if HandlerRes =:= ok, Buffer =/= close ->
+					receive {cowboy_req, resp_sent} -> ok after 0 -> ok end,
 					?MODULE:parse_request(Buffer,
 						State#state{req_keepalive=Keepalive + 1,
 						until=until(Timeout)}, 0);
@@ -531,7 +517,7 @@ error_terminate(Status, State=#state{socket=Socket, transport=Transport,
 
 -spec error_terminate(cowboy:http_status(), cowboy_req:req(), #state{}) -> ok.
 error_terminate(Status, Req, State) ->
-	cowboy_req:maybe_reply(Status, Req),
+	_ = cowboy_req:reply(Status, Req),
 	terminate(State).
 
 -spec terminate(#state{}) -> ok.

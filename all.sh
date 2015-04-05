@@ -1,9 +1,9 @@
 #!/bin/sh
 
 KERL_INSTALL_PATH=~/erlang
-KERL_RELEASES="r15b01 r15b02 r15b03 r16b r16b01 r16b02 r16b03 r16b03-1 maint master"
+KERL_RELEASES="17.0 17.1.2 17.3"
 
-make build-tests
+make build-ct-suites
 
 for rel in $KERL_RELEASES
 do

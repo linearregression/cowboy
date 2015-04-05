@@ -1,41 +1,34 @@
 %% Feel free to use, reuse and abuse the code in this file.
 
 -module(http_loop_stream_recv).
--export([init/3]).
+
+-export([init/2]).
 -export([info/3]).
 -export([terminate/3]).
 
-init({_, http}, Req, _) ->
+init(Req, _) ->
 	receive after 100 -> ok end,
 	self() ! stream,
-	{loop, Req, 1, 100}.
+	{cowboy_loop, Req, undefined, 100}.
 
-info(stream, Req, Id) ->
-	case stream_next(Req) of
-		{ok, Id, Req2} ->
-			info(stream, Req2, Id+1);
-		{done, Req2} ->
-			{ok, Req3} = cowboy_req:reply(200, Req2),
-			{ok, Req3, Id}
+info(stream, Req, undefined) ->
+	stream(Req, 1, <<>>).
+
+stream(Req, ID, Acc) ->
+	case cowboy_req:body(Req) of
+		{ok, <<>>, Req2} ->
+			{stop, cowboy_req:reply(200, Req2), undefined};
+		{_, Data, Req2} ->
+			parse_id(Req2, ID, << Acc/binary, Data/binary >>)
 	end.
 
-terminate({normal, shutdown}, _, _) ->
+parse_id(Req, ID, Data) ->
+	case Data of
+		<< ID:32, Rest/bits >> ->
+			parse_id(Req, ID + 1, Rest);
+		_ ->
+			stream(Req, ID, Data)
+	end.
+
+terminate(stop, _, _) ->
 	ok.
-
-stream_next(Req) ->
-	stream_next(<<>>, Req).
-
-stream_next(Buffer, Req) ->
-	case cowboy_req:stream_body(Req) of
-		{ok, Packet, Req2} ->
-			case <<Buffer/binary, Packet/binary>> of
-				<<Id:32>> ->
-					{ok, Id, Req2};
-				Buffer2 when byte_size(Buffer2) < 4 ->
-					stream_next(Buffer2, Req2);
-				_InvalidBuffer ->
-					{error, invalid_chunk}
-			end;
-		Other ->
-			Other
-	end.

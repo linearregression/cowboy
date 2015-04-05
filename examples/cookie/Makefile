@@ -1,7 +1,4 @@
 PROJECT = cookie
-
 DEPS = cowboy erlydtl
-dep_cowboy = pkg://cowboy master
-dep_erlydtl = pkg://erlydtl master
-
+dep_cowboy = git https://github.com/ninenines/cowboy master
 include ../../erlang.mk

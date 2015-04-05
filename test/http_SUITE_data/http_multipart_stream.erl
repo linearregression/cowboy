@@ -1,19 +1,12 @@
 %% Feel free to use, reuse and abuse the code in this file.
 
 -module(http_multipart_stream).
--behaviour(cowboy_http_handler).
--export([init/3, handle/2, terminate/3]).
 
-init(_, Req, []) ->
-	{ok, Req, undefined}.
+-export([init/2]).
 
-handle(Req, State) ->
+init(Req, Opts) ->
 	Req2 = multipart(Req),
-	{ok, Req3} = cowboy_req:reply(200, Req2),
-	{ok, Req3, State}.
-
-terminate(_, _, _) ->
-	ok.
+	{ok, cowboy_req:reply(200, Req2), Opts}.
 
 multipart(Req) ->
 	case cowboy_req:part(Req) of

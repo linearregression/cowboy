@@ -1,6 +1,4 @@
 PROJECT = markdown_middleware
-
 DEPS = cowboy
-dep_cowboy = pkg://cowboy master
-
+dep_cowboy = git https://github.com/ninenines/cowboy master
 include ../../erlang.mk
